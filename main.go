@@ -9,8 +9,8 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/sirupsen/logrus"
 	"github.com/kelseyhightower/envconfig"
+	"github.com/sirupsen/logrus"
 )
 
 type Args struct {
@@ -27,15 +27,13 @@ type Args struct {
 	PEMFileContents string `envconfig:"PLUGIN_PEM_FILE_CONTENTS"`
 	PEMFilePath     string `envconfig:"PLUGIN_PEM_FILE_PATH"`
 	Level           string `envconfig:"PLUGIN_LOG_LEVEL"`
-	GitPath 		string `envconfig:"PLUGIN_GIT_PATH"`
+	GitPath         string `envconfig:"PLUGIN_GIT_PATH"`
 	CommitSha       string `envconfig:"DRONE_COMMIT_SHA"`
 	RepoURL         string `envconfig:"DRONE_GIT_HTTP_URL"`
 	BranchName      string `envconfig:"DRONE_REPO_BRANCH"`
 	CommitMessage   string `envconfig:"DRONE_COMMIT_MESSAGE"`
 	DefaultPath     string `envconfig:"DRONE_WORKSPACE"`
 }
-
-
 
 // Artifact represents a Docker image artifact with its SHA256 hash.
 type Artifact struct {
@@ -44,11 +42,11 @@ type Artifact struct {
 
 // Configure logrus to use a custom formatter
 func init() {
-    logrus.SetFormatter(&logrus.TextFormatter{
-        DisableTimestamp: true,        // Remove timestamp
-        DisableQuote:     true,        // Remove quotes around strings
-		DisableLevelTruncation:    false,       // Keep log level
-    })
+	logrus.SetFormatter(&logrus.TextFormatter{
+		DisableTimestamp:       true,  // Remove timestamp
+		DisableQuote:           true,  // Remove quotes around strings
+		DisableLevelTruncation: false, // Keep log level
+	})
 }
 
 func main() {
@@ -69,10 +67,10 @@ func main() {
 
 // Exec contains the main logic for executing commands related to Docker images and JFrog.
 func Exec(ctx context.Context, args Args) error {
-	
+
 	// If GitPath is null, assign default value
-	if args.GitPath==""{
-		args.GitPath=args.DefaultPath
+	if args.GitPath == "" {
+		args.GitPath = args.DefaultPath
 	}
 
 	// Parse the Docker image to extract repository, image name, and tag
@@ -226,33 +224,25 @@ func extractSha256FromOutput(output string) (string, error) {
 
 // runCommand executes a command and logs its output.
 func runCommand(cmdArgs []string) error {
-    cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
-    output, err := cmd.CombinedOutput()
-    
-    // Split the output by newlines and log each line separately
-    outputLines := strings.Split(strings.TrimSpace(string(output)), "\n")
-    for _, line := range outputLines {
-        if line != "" {
-            logrus.Info(line)
-        }
-    }
-    
-    if err != nil {
-        logrus.Errorf("Error executing command: %v", err)
-        return err
-    }
-    return nil
+	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
+	output, err := cmd.CombinedOutput()
+	logrus.Infof("Command output:\n%s\n", string(output))
+	if err != nil {
+		logrus.Errorf("Error executing command: %v", err)
+		return err
+	}
+	return nil
 }
 
 // runCommandAndCaptureOutput executes a command and captures its output as a string.
 func runCommandAndCaptureOutput(cmdArgs []string) (string, error) {
-    cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
-    output, err := cmd.CombinedOutput()
-    
-    // Replace literal \n with actual newlines
-    formattedOutput := strings.ReplaceAll(string(output), "\\n", "\n")
-    
-    return formattedOutput, err
+	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
+	output, err := cmd.CombinedOutput()
+
+	// Replace literal \n with actual newlines
+	formattedOutput := strings.ReplaceAll(string(output), "\\n", "\n")
+
+	return formattedOutput, err
 }
 
 // setAuthParams sets authentication parameters for the command based on the provided args.
