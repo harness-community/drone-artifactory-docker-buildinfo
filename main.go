@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/kelseyhightower/envconfig"
+	"github.com/sirupsen/logrus"
 )
 
 type Args struct {
@@ -26,37 +27,65 @@ type Args struct {
 	PEMFileContents string `envconfig:"PLUGIN_PEM_FILE_CONTENTS"`
 	PEMFilePath     string `envconfig:"PLUGIN_PEM_FILE_PATH"`
 	Level           string `envconfig:"PLUGIN_LOG_LEVEL"`
+	GitPath         string `envconfig:"PLUGIN_GIT_PATH"`
+	CommitSha       string `envconfig:"DRONE_COMMIT_SHA"`
+	RepoURL         string `envconfig:"DRONE_GIT_HTTP_URL"`
+	BranchName      string `envconfig:"DRONE_REPO_BRANCH"`
+	CommitMessage   string `envconfig:"DRONE_COMMIT_MESSAGE"`
+	DefaultPath     string `envconfig:"DRONE_WORKSPACE"`
 }
 
+// Artifact represents a Docker image artifact with its SHA256 hash.
 type Artifact struct {
 	Sha256 string `json:"sha256"`
 }
 
+// Configure logrus to use a custom formatter
+func init() {
+	logrus.SetFormatter(&logrus.TextFormatter{
+		DisableTimestamp:       true,  // Remove timestamp
+		DisableQuote:           true,  // Remove quotes around strings
+		DisableLevelTruncation: false, // Keep log level
+	})
+}
+
 func main() {
 	var args Args
+	// Process environment variables into the Args struct
 	err := envconfig.Process("", &args)
 	if err != nil {
-		fmt.Printf("Error processing environment variables: %v\n", err)
+		logrus.Infof("Error processing environment variables: %v\n", err)
 		os.Exit(1)
 	}
 
+	// Execute the main functionality of the program
 	if err := Exec(context.Background(), args); err != nil {
-		fmt.Printf("Error: %v\n", err)
+		logrus.Infof("Error: %v\n", err)
 		os.Exit(1)
 	}
 }
 
+// Exec contains the main logic for executing commands related to Docker images and JFrog.
 func Exec(ctx context.Context, args Args) error {
-	repo, imageName, imageTag, err := parseDockerImage(args.DockerImage)
-	if err != nil {
-		return fmt.Errorf("error parsing Docker image: %v", err)
+
+	// If GitPath is null, assign default value
+	if args.GitPath == "" {
+		args.GitPath = args.DefaultPath
 	}
 
+	// Parse the Docker image to extract repository, image name, and tag
+	repo, imageName, imageTag, err := parseDockerImage(args.DockerImage)
+	if err != nil {
+		logrus.Errorf("error parsing Docker image: %v", err)
+	}
+
+	// Sanitize the URL for JFrog
 	sanitizedURL, err := sanitizeURL(args.URL)
 	if err != nil {
 		return err
 	}
 
+	// Create a query to find the manifest.json file in JFrog
 	query := map[string]interface{}{
 		"files": []map[string]interface{}{
 			{
@@ -71,70 +100,94 @@ func Exec(ctx context.Context, args Args) error {
 		},
 	}
 
+	// Create a JSON file to hold the query
 	queryFile, err := os.Create("query.json")
 	if err != nil {
-		return fmt.Errorf("error creating query.json file: %v", err)
+		logrus.Errorf("error creating query.json file: %v", err)
 	}
 	defer queryFile.Close()
 
+	// Encode the query into the JSON file
 	encoder := json.NewEncoder(queryFile)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(query); err != nil {
-		return fmt.Errorf("error encoding query to query.json: %v", err)
+		logrus.Errorf("error encoding query to query.json: %v", err)
 	}
 
+	// Prepare the command to search for the manifest file in JFrog
 	cmdArgs := []string{"jfrog", "rt", "s", "--spec=query.json", "--url=" + sanitizedURL}
 	cmdArgs, err = setAuthParams(cmdArgs, args)
 	if err != nil {
-		return fmt.Errorf("error setting auth parameters: %v", err)
+		logrus.Errorf("error setting auth parameters: %v", err)
 	}
 
+	// Run the command and capture the output
 	output, err := runCommandAndCaptureOutput(cmdArgs)
 	if err != nil {
-		return fmt.Errorf("error executing jfrog rt s command: %v", err)
+		logrus.Errorf("error executing jfrog rt s command: %v", err)
 	}
 
+	// Extract the SHA256 hash from the command output
 	sha256, err := extractSha256FromOutput(output)
 	if err != nil {
 		return err
 	}
 
+	// Prepare the content for the image file
 	imageFileContent := fmt.Sprintf("%s/%s:%s@sha256:%s", repo, imageName, imageTag, sha256)
 	imageFileName := "image_info.txt"
 
+	// Create a file to store the image information
 	imageFile, err := os.Create(imageFileName)
 	if err != nil {
-		return fmt.Errorf("error creating image file: %v", err)
+		logrus.Errorf("error creating image file: %v", err)
 	}
 	defer imageFile.Close()
 
+	// Write the image information to the file
 	if _, err := imageFile.WriteString(imageFileContent); err != nil {
-		return fmt.Errorf("error writing to image file: %v", err)
+		logrus.Errorf("error writing to image file: %v", err)
 	}
 
+	// Command to create the Docker build in JFrog
+	logrus.Infof("Setting Build Properties to %s", args.DockerImage)
 	cmdArgs = []string{"jfrog", "rt", "build-docker-create", repo, "--build-name=" + args.BuildName, "--build-number=" + args.BuildNumber, "--image-file=" + imageFileName, "--url=" + sanitizedURL}
 	cmdArgs, err = setAuthParams(cmdArgs, args)
 	if err != nil {
-		return fmt.Errorf("error setting auth parameters: %v", err)
+		logrus.Errorf("error setting auth parameters: %v", err)
 	}
 
+	// Execute the build creation command
 	if err := runCommand(cmdArgs); err != nil {
-		return fmt.Errorf("error executing jfrog rt build-docker-create command: %v", err)
+		logrus.Errorf("error executing jfrog rt build-docker-create command: %v", err)
 	}
 
+	// If Git information is available, add it to the build info
+	logrus.Info("Setting Git Properties")
+	if args.RepoURL != "" && args.BranchName != "" && args.CommitSha != "" {
+		cmdArgs = []string{"jfrog", "rt", "build-add-git", args.BuildName, args.BuildNumber, args.GitPath}
+		if err := runCommand(cmdArgs); err != nil {
+			logrus.Errorf("error executing jfrog rt build-add-git command: %v", err)
+		}
+	}
+
+	// Command to publish the build information to JFrog
+	logrus.Info("Publishing Build Info")
 	cmdArgs = []string{"jfrog", "rt", "build-publish", "--build-url=" + args.BuildURL, "--url=" + sanitizedURL, args.BuildName, args.BuildNumber}
 	cmdArgs, err = setAuthParams(cmdArgs, args)
 	if err != nil {
-		return fmt.Errorf("error setting auth parameters: %v", err)
+		logrus.Errorf("error setting auth parameters: %v", err)
 	}
 
+	// Execute the build publish command
 	if err := runCommand(cmdArgs); err != nil {
-		return fmt.Errorf("error executing jfrog rt build-publish command: %v", err)
+		logrus.Errorf("error executing jfrog rt build-publish command: %v", err)
 	}
 
 	return nil
 }
 
+// extractSha256FromOutput extracts the SHA256 hash from the command output.
 func extractSha256FromOutput(output string) (string, error) {
 	// Split the output into lines
 	lines := strings.Split(output, "\n")
@@ -152,36 +205,47 @@ func extractSha256FromOutput(output string) (string, error) {
 	if startIndex != -1 {
 		jsonStr = strings.Join(lines[startIndex:], "\n")
 	} else {
-		return "", fmt.Errorf("could not find JSON output in the command response")
+		logrus.Errorf("could not find JSON output in the command response")
 	}
 
 	// Parse the JSON output
 	var artifacts []Artifact
 	err := json.Unmarshal([]byte(jsonStr), &artifacts)
 	if err != nil {
-		return "", fmt.Errorf("error parsing JSON: %v", err)
+		logrus.Errorf("error parsing JSON: %v", err)
 	}
 
 	if len(artifacts) == 0 {
-		return "", fmt.Errorf("no results found in jfrog output")
+		logrus.Errorf("no results found in jfrog output")
 	}
 
 	return artifacts[0].Sha256, nil
 }
 
+// runCommand executes a command and logs its output.
 func runCommand(cmdArgs []string) error {
 	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	output, err := cmd.CombinedOutput()
+	logrus.Infof("Command output:\n%s\n", string(output))
+	if err != nil {
+		logrus.Errorf("Error executing command: %v", err)
+		return err
+	}
+	return nil
 }
 
+// runCommandAndCaptureOutput executes a command and captures its output as a string.
 func runCommandAndCaptureOutput(cmdArgs []string) (string, error) {
 	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
 	output, err := cmd.CombinedOutput()
-	return string(output), err
+
+	// Replace literal \n with actual newlines
+	formattedOutput := strings.ReplaceAll(string(output), "\\n", "\n")
+
+	return formattedOutput, err
 }
 
+// setAuthParams sets authentication parameters for the command based on the provided args.
 func setAuthParams(cmdArgs []string, args Args) ([]string, error) {
 	if args.Username != "" && args.Password != "" {
 		cmdArgs = append(cmdArgs, fmt.Sprintf("--user=%s", args.Username))
@@ -191,7 +255,7 @@ func setAuthParams(cmdArgs []string, args Args) ([]string, error) {
 	} else if args.AccessToken != "" {
 		cmdArgs = append(cmdArgs, fmt.Sprintf("--access-token=%s", args.AccessToken))
 	} else {
-		return nil, fmt.Errorf("either username/password, api key or access token needs to be set")
+		logrus.Errorf("either username/password, api key or access token needs to be set")
 	}
 	return cmdArgs, nil
 }
@@ -201,7 +265,7 @@ func parseDockerImage(dockerImage string) (repo, imageName, imageTag string, err
 	// Split by the last occurrence of ':'
 	lastColonIndex := strings.LastIndex(dockerImage, ":")
 	if lastColonIndex == -1 {
-		return "", "", "", fmt.Errorf("invalid Docker image format: %s", dockerImage)
+		logrus.Errorf("invalid Docker image format: %s", dockerImage)
 	}
 
 	imageTag = dockerImage[lastColonIndex+1:]
@@ -210,7 +274,7 @@ func parseDockerImage(dockerImage string) (repo, imageName, imageTag string, err
 	// Split the image path by '/'
 	pathParts := strings.Split(imagePath, "/")
 	if len(pathParts) < 2 {
-		return "", "", "", fmt.Errorf("invalid Docker image format: %s", dockerImage)
+		logrus.Errorf("invalid Docker image format: %s", dockerImage)
 	}
 
 	// Check if the first part is in the x.y.z format
@@ -233,14 +297,14 @@ func parseDockerImage(dockerImage string) (repo, imageName, imageTag string, err
 func sanitizeURL(inputURL string) (string, error) {
 	parsedURL, err := url.Parse(inputURL)
 	if err != nil {
-		return "", fmt.Errorf("invalid URL: %s", inputURL)
+		logrus.Errorf("invalid URL: %s", inputURL)
 	}
 	if parsedURL.Scheme == "" || parsedURL.Host == "" {
-		return "", fmt.Errorf("invalid URL: %s", inputURL)
+		logrus.Errorf("invalid URL: %s", inputURL)
 	}
 	parts := strings.Split(parsedURL.Path, "/artifactory")
 	if len(parts) < 2 {
-		return "", fmt.Errorf("url does not contain '/artifactory': %s", inputURL)
+		logrus.Errorf("url does not contain '/artifactory': %s", inputURL)
 	}
 
 	// Always set the path to the first part + "/artifactory/"
