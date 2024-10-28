@@ -1,14 +1,20 @@
-# Artifactory Docker Build Info Plugin
+# Artifactory Docker Publish Build Info Plugin
+
+## Synopsis
 
 A Drone plugin that publishes Docker image build information to JFrog Artifactory, including build details, VCS information, and SHA256 verification.
 
-## Features
+To learn how to utilize Drone plugins in Harness CI, please consult the provided [documentation](https://developer.harness.io/docs/continuous-integration/use-ci/use-drone-plugins/run-a-drone-plugin-in-ci).
 
-- Publishes Docker image build information to JFrog Artifactory
-- Verifies image SHA256 hash
-- Adds Git commit information (VCS data) to build metadata
-- Creates and publishes detailed build information
-- Supports multiple authentication methods
+## Plugin Image
+
+The plugin `plugins/artifactory-publish-docker-buildinfo` is available for the following architectures:
+
+| OS            | Tag                   |
+| ------------- | --------------------- |
+| latest        | `linux-amd64,linux-arm64` |
+| linux/amd64   | `linux-amd64`         |
+| linux/arm64   | `linux-arm64`         |
 
 ## Requirements
 
@@ -26,25 +32,18 @@ The plugin supports three authentication methods:
 
 ## Configuration
 
-### Required Settings
-
-| Setting | Description |
-|---------|-------------|
-| `url` | JFrog Artifactory URL |
-| `docker_image` | Full path to Docker image in Artifactory |
-| `build_name` | Name of the build |
-| `build_number` | Build number (usually pipeline sequence ID) |
-
-### Optional Settings
-
-| Setting | Description |
-|---------|-------------|
-| `access_token` | JFrog access token for authentication |
-| `username` | JFrog username (alternative to access token) |
-| `password` | JFrog password (alternative to access token) |
-| `api_key` | JFrog API key (alternative to access token) |
-| `build_url` | URL to the build in Harness CI |
-| `git_path` | Path to Git repository (defaults to workspace) |
+| Parameter | Choices/<span style="color:blue;">Defaults</span> | Comments |
+| :------------------------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------ | --------------------------------------------------------------- |
+| `url` <span style="font-size: 10px"><br/>`string`</span>                  | Required | JFrog Artifactory URL |
+| `docker_image` <span style="font-size: 10px"><br/>`string`</span>          | Required | Full path to Docker image in Artifactory |
+| `build_name` <span style="font-size: 10px"><br/>`string`</span>           | Required | Name of the build |
+| `build_number` <span style="font-size: 10px"><br/>`string`</span>         | Required | Build number (usually pipeline sequence ID) |
+| `access_token` <span style="font-size: 10px"><br/>`string`</span>                                                                  | Either Access_token or Username Password or API key is required | JFrog access token for authentication |
+| `username` <span style="font-size: 10px"><br/>`string`</span>                                                                      | Either Access_token or Username Password or API key is required| JFrog username (alternative to access token) |
+| `password` <span style="font-size: 10px"><br/>`string`</span>                                                                      | Either Access_token or Username Password or API key is required| JFrog password (alternative to access token) |
+| `api_key` <span style="font-size: 10px"><br/>`string`</span>                                                                       | Either Access_token or Username Password or API key is required| JFrog API key (alternative to access token) |
+| `build_url` <span style="font-size: 10px"><br/>`string`</span>                                                                     | Optional | URL to the build in Harness CI |
+| `git_path` <span style="font-size: 10px"><br/>`string`</span>                                                                      | Optional | Path to Git repository (defaults to workspace) |
 
 ## Usage Example
 
@@ -66,11 +65,8 @@ Here's how to use the plugin in your Harness CI pipeline:
         docker_image: artifactory.example.com/repo/image:tag
         build_number: <+pipeline.sequenceId>
 ```
-
 ## Environment Variables
-
 The plugin automatically captures these environment variables if available:
-
 - `DRONE_COMMIT_SHA`: Git commit SHA
 - `DRONE_GIT_HTTP_URL`: Git repository URL
 - `DRONE_REPO_BRANCH`: Git branch name
