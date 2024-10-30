@@ -22,14 +22,6 @@ The plugin `plugins/artifactory-publish-docker-buildinfo` is available for the f
 - Valid authentication credentials (Access Token, API Key, or Username/Password)
 - Docker image published to Artifactory registry
 
-## Authentication
-
-The plugin supports three authentication methods:
-
-1. Access Token (Recommended)
-2. Username and Password
-3. API Key
-
 ## Configuration
 
 | Parameter | Choices/<span style="color:blue;">Defaults</span> | Comments |
@@ -47,7 +39,9 @@ The plugin supports three authentication methods:
 
 ## Usage Example
 
-Here's how to use the plugin in your Harness CI pipeline:
+Here's how to use the plugin in your Harness CI pipeline 
+
+- using access token:
 
 ```yaml
 - step:
@@ -65,37 +59,42 @@ Here's how to use the plugin in your Harness CI pipeline:
         docker_image: artifactory.example.com/repo/image:tag
         build_number: <+pipeline.sequenceId>
 ```
-## Environment Variables
-The plugin automatically captures these environment variables if available:
-- `DRONE_COMMIT_SHA`: Git commit SHA
-- `DRONE_GIT_HTTP_URL`: Git repository URL
-- `DRONE_REPO_BRANCH`: Git branch name
-- `DRONE_COMMIT_MESSAGE`: Commit message
-- `DRONE_WORKSPACE`: Default workspace path
 
-## How It Works
+- using username password:
 
-1. Verifies the Docker image exists in Artifactory
-2. Extracts and validates the image SHA256 hash
-3. Creates build information with Docker image details
-4. Adds VCS information if available
-5. Publishes the complete build information to Artifactory
+```yaml
+- step:
+    type: Plugin
+    name: Publish Build Info
+    identifier: publish_build_info
+    spec:
+      connectorRef: docker_registry
+      image: plugins/artifactory-publish-docker-buildinfo:1.1.0
+      settings:
+        url: https://artifactory.example.com/artifactory
+        username: <+secrets.getValue("artifactory_username")>
+        password: <+secrets.getValue("artifactory_password")>
+        build_name: <+pipeline.name>
+        build_url: <+pipeline.executionUrl>
+        docker_image: artifactory.example.com/repo/image:tag
+        build_number: <+pipeline.sequenceId>
+```
 
-## Troubleshooting
+- using API key:
 
-Common issues and solutions:
-
-1. Authentication Failures
-   - Verify credentials are correct
-   - Ensure proper permissions in Artifactory
-   - Check URL format includes `/artifactory` path
-
-2. Image Not Found
-   - Verify image path is correct
-   - Confirm image exists in specified repository
-   - Check repository permissions
-
-3. Build Publication Errors
-   - Ensure build name and number are unique
-   - Verify Artifactory has enough disk space
-   - Check network connectivity to Artifactory
+```yaml
+- step:
+    type: Plugin
+    name: Publish Build Info
+    identifier: publish_build_info
+    spec:
+      connectorRef: docker_registry 
+      image: plugins/artifactory-publish-docker-buildinfo:1.1.0
+      settings:
+        url: https://artifactory.example.com/artifactory
+        api_key: <+secrets.getValue("artifactory_api_key")>
+        build_name: <+pipeline.name>
+        build_url: <+pipeline.executionUrl>
+        docker_image: artifactory.example.com/repo/image:tag
+        build_number: <+pipeline.sequenceId>
+```
