@@ -54,14 +54,12 @@ func main() {
 	// Process environment variables into the Args struct
 	err := envconfig.Process("", &args)
 	if err != nil {
-		logrus.Infof("Error processing environment variables: %v\n", err)
-		os.Exit(1)
+		logrus.Fatalln("Error processing environment variables:", err)
 	}
 
 	// Execute the main functionality of the program
 	if err := Exec(context.Background(), args); err != nil {
-		logrus.Infof("Error: %v\n", err)
-		os.Exit(1)
+		logrus.Fatalln("Error:", err)
 	}
 }
 
@@ -76,7 +74,7 @@ func Exec(ctx context.Context, args Args) error {
 	// Parse the Docker image to extract repository, image name, and tag
 	repo, imageName, imageTag, err := parseDockerImage(args.DockerImage)
 	if err != nil {
-		logrus.Errorf("error parsing Docker image: %v", err)
+		logrus.Fatalln("error parsing Docker image:", err)
 	}
 
 	// Sanitize the URL for JFrog
@@ -103,7 +101,7 @@ func Exec(ctx context.Context, args Args) error {
 	// Create a JSON file to hold the query
 	queryFile, err := os.Create("query.json")
 	if err != nil {
-		logrus.Errorf("error creating query.json file: %v", err)
+		logrus.Fatalln("error creating query.json file:", err)
 	}
 	defer queryFile.Close()
 
@@ -111,7 +109,7 @@ func Exec(ctx context.Context, args Args) error {
 	encoder := json.NewEncoder(queryFile)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(query); err != nil {
-		logrus.Errorf("error encoding query to query.json: %v", err)
+		logrus.Fatalln("failed to encode query to query.json:", err)
 	}
 
 	// Prepare the command to search for the manifest file in JFrog
@@ -124,7 +122,7 @@ func Exec(ctx context.Context, args Args) error {
 	// Run the command and capture the output
 	output, err := runCommandAndCaptureOutput(cmdArgs)
 	if err != nil {
-		logrus.Errorf("error executing jfrog rt s command: %v", err)
+		logrus.Fatalln("error executing jfrog rt s command: ", err)
 	}
 
 	// Extract the SHA256 hash from the command output
@@ -159,7 +157,7 @@ func Exec(ctx context.Context, args Args) error {
 
 	// Execute the build creation command
 	if err := runCommand(cmdArgs); err != nil {
-		logrus.Errorf("error executing jfrog rt build-docker-create command: %v", err)
+		logrus.Fatalln("error executing jfrog rt build-docker-create command:", err)
 	}
 
 	// If Git information is available, add it to the build info
@@ -167,7 +165,7 @@ func Exec(ctx context.Context, args Args) error {
 	if args.RepoURL != "" && args.BranchName != "" && args.CommitSha != "" {
 		cmdArgs = []string{"jfrog", "rt", "build-add-git", args.BuildName, args.BuildNumber, args.GitPath}
 		if err := runCommand(cmdArgs); err != nil {
-			logrus.Errorf("error executing jfrog rt build-add-git command: %v", err)
+			logrus.Fatalln("error executing jfrog rt build-add-git command:", err)
 		}
 	}
 
@@ -181,7 +179,7 @@ func Exec(ctx context.Context, args Args) error {
 
 	// Execute the build publish command
 	if err := runCommand(cmdArgs); err != nil {
-		logrus.Errorf("error executing jfrog rt build-publish command: %v", err)
+		logrus.Fatalln("error executing jfrog rt build-publish command:", err)
 	}
 
 	return nil
