@@ -31,6 +31,7 @@ type Args struct {
 	CommitSha       string `envconfig:"DRONE_COMMIT_SHA"`
 	RepoURL         string `envconfig:"DRONE_GIT_HTTP_URL"`
 	BranchName      string `envconfig:"DRONE_REPO_BRANCH"`
+	TagName         string `envconfig:"DRONE_TAG"`
 	CommitMessage   string `envconfig:"DRONE_COMMIT_MESSAGE"`
 	DefaultPath     string `envconfig:"DRONE_WORKSPACE"`
 }
@@ -162,10 +163,20 @@ func Exec(ctx context.Context, args Args) error {
 
 	// If Git information is available, add it to the build info
 	logrus.Info("Setting Git Properties")
-	if args.RepoURL != "" && args.BranchName != "" && args.CommitSha != "" {
+	hasVCSInfo := args.RepoURL != "" && args.CommitSha != "" &&
+		(args.BranchName != "" || args.TagName != "")
+
+	if hasVCSInfo {
+		logrus.WithFields(logrus.Fields{
+			"repo_url":    args.RepoURL,
+			"commit_sha":  args.CommitSha,
+			"branch_name": args.BranchName,
+			"tag_name":    args.TagName,
+		}).Info("Adding VCS information")
+
 		cmdArgs = []string{"jfrog", "rt", "build-add-git", args.BuildName, args.BuildNumber, args.GitPath}
 		if err := runCommand(cmdArgs); err != nil {
-			logrus.Fatalln("error executing jfrog rt build-add-git command:", err)
+			logrus.Warnf("error executing jfrog rt build-add-git command: %v", err)
 		}
 	}
 
