@@ -100,6 +100,7 @@ func Exec(ctx context.Context, args Args) error {
 	}
 
 	// Create a JSON file to hold the query
+	logrus.Infof("Creating query file: query.json")
 	queryFile, err := os.Create("query.json")
 	if err != nil {
 		logrus.Fatalln("error creating query.json file:", err)
@@ -111,6 +112,11 @@ func Exec(ctx context.Context, args Args) error {
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(query); err != nil {
 		logrus.Fatalln("failed to encode query to query.json:", err)
+	}
+
+	queryFileContents, err := os.ReadFile("query.json")
+	if err == nil {
+		logrus.Infof("Query file contents:\n%s", string(queryFileContents))
 	}
 
 	// Prepare the command to search for the manifest file in JFrog
@@ -137,6 +143,7 @@ func Exec(ctx context.Context, args Args) error {
 	imageFileName := "image_info.txt"
 
 	// Create a file to store the image information
+	logrus.Infof("Creating image info file: %s", imageFileName)
 	imageFile, err := os.Create(imageFileName)
 	if err != nil {
 		logrus.Errorf("error creating image file: %v", err)
@@ -147,6 +154,8 @@ func Exec(ctx context.Context, args Args) error {
 	if _, err := imageFile.WriteString(imageFileContent); err != nil {
 		logrus.Errorf("error writing to image file: %v", err)
 	}
+
+	logrus.Infof("Image info file contents: %s", imageFileContent)
 
 	// Command to create the Docker build in JFrog
 	logrus.Infof("Setting Build Properties to %s", args.DockerImage)
@@ -214,18 +223,18 @@ func extractSha256FromOutput(output string) (string, error) {
 	if startIndex != -1 {
 		jsonStr = strings.Join(lines[startIndex:], "\n")
 	} else {
-		logrus.Errorf("could not find JSON output in the command response")
+		return "", fmt.Errorf("could not find JSON output in the command response")
 	}
 
 	// Parse the JSON output
 	var artifacts []Artifact
 	err := json.Unmarshal([]byte(jsonStr), &artifacts)
 	if err != nil {
-		logrus.Errorf("error parsing JSON: %v", err)
+		return "", fmt.Errorf("error parsing JSON: %v", err)
 	}
 
 	if len(artifacts) == 0 {
-		logrus.Errorf("no results found in jfrog output")
+		return "", fmt.Errorf("no artifacts found in JFrog output")
 	}
 
 	return artifacts[0].Sha256, nil
@@ -233,6 +242,7 @@ func extractSha256FromOutput(output string) (string, error) {
 
 // runCommand executes a command and logs its output.
 func runCommand(cmdArgs []string) error {
+	logrus.Infof("Executing command: %s", strings.Join(cmdArgs, " "))
 	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
 	output, err := cmd.CombinedOutput()
 	logrus.Infof("Command output:\n%s\n", string(output))
@@ -245,6 +255,7 @@ func runCommand(cmdArgs []string) error {
 
 // runCommandAndCaptureOutput executes a command and captures its output as a string.
 func runCommandAndCaptureOutput(cmdArgs []string) (string, error) {
+	logrus.Infof("Executing command and capturing output: %s", strings.Join(cmdArgs, " "))
 	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
 	output, err := cmd.CombinedOutput()
 
