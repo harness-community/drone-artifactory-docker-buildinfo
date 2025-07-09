@@ -195,16 +195,15 @@ func Exec(ctx context.Context, args Args) error {
 			"principal": args.Principal,
 		}).Info("Adding Principal information")
 
-		// Format: "key1=value1;key2=value2"
-		propertyString := fmt.Sprintf("principal=%s", args.Principal)
-		cmdArgs = []string{"jfrog", "rt", "build-add-properties", args.BuildName, args.BuildNumber, propertyString, "--url=" + sanitizedURL}
+		// Adding principal as a build annotation
+		cmdArgs = []string{"jfrog", "rt", "build-add-annotation", "--annotation=principal=" + args.Principal, args.BuildName, args.BuildNumber, "--url=" + sanitizedURL}
 		cmdArgs, err = setAuthParams(cmdArgs, args)
 		if err != nil {
 			logrus.Errorf("error setting auth parameters: %v", err)
 		}
 
 		if err := runCommand(cmdArgs); err != nil {
-			logrus.Warnf("error executing jfrog rt build-add-properties command: %v", err)
+			logrus.Warnf("error executing jfrog rt build-add-annotation command: %v", err)
 		}
 	}
 
