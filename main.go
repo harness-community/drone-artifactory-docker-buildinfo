@@ -34,6 +34,7 @@ type Args struct {
 	TagName         string `envconfig:"DRONE_TAG"`
 	CommitMessage   string `envconfig:"DRONE_COMMIT_MESSAGE"`
 	DefaultPath     string `envconfig:"DRONE_WORKSPACE"`
+	Principal       string `envconfig:"PLUGIN_PRINCIPAL"`
 }
 
 // Artifact represents a Docker image artifact with its SHA256 hash.
@@ -53,8 +54,7 @@ func init() {
 func main() {
 	var args Args
 	// Process environment variables into the Args struct
-	err := envconfig.Process("", &args)
-	if err != nil {
+	if err := envconfig.Process("", &args); err != nil {
 		logrus.Fatalln("Error processing environment variables:", err)
 	}
 
@@ -186,6 +186,25 @@ func Exec(ctx context.Context, args Args) error {
 		cmdArgs = []string{"jfrog", "rt", "build-add-git", args.BuildName, args.BuildNumber, args.GitPath}
 		if err := runCommand(cmdArgs); err != nil {
 			logrus.Warnf("error executing jfrog rt build-add-git command: %v", err)
+		}
+	}
+
+	// Add Principal information to build properties if available
+	if args.Principal != "" {
+		logrus.WithFields(logrus.Fields{
+			"principal": args.Principal,
+		}).Info("Adding Principal information")
+
+		// Format: "key1=value1;key2=value2"
+		propertyString := fmt.Sprintf("principal=%s", args.Principal)
+		cmdArgs = []string{"jfrog", "rt", "build-add-properties", args.BuildName, args.BuildNumber, propertyString, "--url=" + sanitizedURL}
+		cmdArgs, err = setAuthParams(cmdArgs, args)
+		if err != nil {
+			logrus.Errorf("error setting auth parameters: %v", err)
+		}
+
+		if err := runCommand(cmdArgs); err != nil {
+			logrus.Warnf("error executing jfrog rt build-add-properties command: %v", err)
 		}
 	}
 
