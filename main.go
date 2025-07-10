@@ -211,8 +211,8 @@ func Exec(ctx context.Context, args Args) error {
 			"principal": buildTrigger,
 		}).Info("Adding Principal information via REST API")
 		
-		// Allow a brief pause for build-publish to complete
-		time.Sleep(2 * time.Second)
+		// Brief pause for build-publish to complete and be available via API
+		time.Sleep(5 * time.Second)
 		
 		// Get the build info via API, modify it, and re-upload it
 		if err := addPrincipalToBuildInfo(args, buildTrigger); err != nil {
@@ -343,8 +343,11 @@ func addPrincipalToBuildInfo(args Args, principal string) error {
 	sanitizedURL = strings.TrimSuffix(sanitizedURL, "/")
 	
 	// Build the API URL for getting build info
-	// Use url.QueryEscape instead of url.PathEscape to properly handle spaces and special characters
-	apiURL := fmt.Sprintf("%s/api/build/%s/%s", sanitizedURL, url.QueryEscape(args.BuildName), url.QueryEscape(args.BuildNumber))
+	// Manually encode the build name and number to ensure compatibility with JFrog API
+	// Replace spaces with %20 instead of + to match JFrog's expectations
+	encodedBuildName := strings.ReplaceAll(url.QueryEscape(args.BuildName), "+", "%20")
+	encodedBuildNumber := strings.ReplaceAll(url.QueryEscape(args.BuildNumber), "+", "%20")
+	apiURL := fmt.Sprintf("%s/api/build/%s/%s", sanitizedURL, encodedBuildName, encodedBuildNumber)
 	logrus.Infof("Fetching build info from: %s", apiURL)
 	
 	// Create the HTTP client
@@ -393,24 +396,25 @@ func addPrincipalToBuildInfo(args Args, principal string) error {
 		return fmt.Errorf("error unmarshaling build info: %v", err)
 	}
 	
-	// Add principal to the buildInfo
+
+	// Extract the inner buildInfo object from the response
 	buildInfoObj, ok := buildInfo["buildInfo"].(map[string]interface{})
 	if !ok {
 		return fmt.Errorf("buildInfo not found or has unexpected format")
 	}
 	
-	// Add the principal field
+	// Add the principal field without disturbing required fields
 	buildInfoObj["principal"] = principal
 	logrus.Infof("Adding principal '%s' to build info JSON structure", principal)
 	
-	// Debug: Log the structure of buildInfoObj
-	logrus.Debugf("Build info structure: %+v", buildInfoObj)
-	
-	// Marshal back to JSON
-	updatedBody, err := json.Marshal(buildInfo)
+	// Extract just the buildInfo object for the PUT request - JFrog API expects this format
+	updatedBody, err := json.Marshal(buildInfoObj)
 	if err != nil {
 		return fmt.Errorf("error marshaling updated build info: %v", err)
 	}
+	
+	// Log at debug level for troubleshooting if needed
+	logrus.Debugf("Sending build info update to API")
 	
 	// Create the PUT request to update the build info
 	apiURL = fmt.Sprintf("%s/api/build", sanitizedURL)
