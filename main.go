@@ -197,14 +197,9 @@ func Exec(ctx context.Context, args Args) error {
 
 		// Set principal as an environment variable and collect it in the build info
 		os.Setenv("HARNESS_BUILD_PRINCIPAL", args.Principal)
-		
+
 		// Use build-collect-env to include the environment variables in the build
 		cmdArgs = []string{"jfrog", "rt", "build-collect-env", args.BuildName, args.BuildNumber}
-		cmdArgs, err = setAuthParams(cmdArgs, args)
-		if err != nil {
-			logrus.Errorf("error setting auth parameters: %v", err)
-		}
-
 		if err := runCommand(cmdArgs); err != nil {
 			logrus.Warnf("error executing jfrog rt build-collect-env command: %v", err)
 		}
