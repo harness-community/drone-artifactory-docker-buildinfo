@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/kelseyhightower/envconfig"
 	"github.com/sirupsen/logrus"
@@ -34,7 +37,6 @@ type Args struct {
 	TagName         string `envconfig:"DRONE_TAG"`
 	CommitMessage   string `envconfig:"DRONE_COMMIT_MESSAGE"`
 	DefaultPath     string `envconfig:"DRONE_WORKSPACE"`
-	Principal       string `envconfig:"PLUGIN_PRINCIPAL"`
 }
 
 // Artifact represents a Docker image artifact with its SHA256 hash.
@@ -189,22 +191,6 @@ func Exec(ctx context.Context, args Args) error {
 		}
 	}
 
-	// Add Principal information to build properties if available
-	if args.Principal != "" {
-		logrus.WithFields(logrus.Fields{
-			"principal": args.Principal,
-		}).Info("Adding Principal information")
-
-		// Set principal as an environment variable and collect it in the build info
-		os.Setenv("HARNESS_BUILD_PRINCIPAL", args.Principal)
-
-		// Use build-collect-env to include the environment variables in the build
-		cmdArgs = []string{"jfrog", "rt", "build-collect-env", args.BuildName, args.BuildNumber}
-		if err := runCommand(cmdArgs); err != nil {
-			logrus.Warnf("error executing jfrog rt build-collect-env command: %v", err)
-		}
-	}
-
 	// Command to publish the build information to JFrog
 	logrus.Info("Publishing Build Info")
 	cmdArgs = []string{"jfrog", "rt", "build-publish", "--build-url=" + args.BuildURL, "--url=" + sanitizedURL, args.BuildName, args.BuildNumber}
@@ -216,6 +202,22 @@ func Exec(ctx context.Context, args Args) error {
 	// Execute the build publish command
 	if err := runCommand(cmdArgs); err != nil {
 		logrus.Fatalln("error executing jfrog rt build-publish command:", err)
+	}
+	
+	// Add Principal directly via REST API using build trigger
+	buildTrigger := os.Getenv("DRONE_BUILD_TRIGGER")
+	if buildTrigger != "" {
+		logrus.WithFields(logrus.Fields{
+			"principal": buildTrigger,
+		}).Info("Adding Principal information via REST API")
+		
+		// Allow a brief pause for build-publish to complete
+		time.Sleep(2 * time.Second)
+		
+		// Get the build info via API, modify it, and re-upload it
+		if err := addPrincipalToBuildInfo(args, buildTrigger); err != nil {
+			logrus.Warnf("error adding principal to build info: %v", err)
+		}
 	}
 
 	return nil
@@ -330,6 +332,114 @@ func parseDockerImage(dockerImage string) (repo, imageName, imageTag string, err
 }
 
 // sanitizeURL trims the URL to include only up to the '/artifactory/' path.
+// addPrincipalToBuildInfo adds the principal field to the build info via REST API
+func addPrincipalToBuildInfo(args Args, principal string) error {
+	sanitizedURL, err := sanitizeURL(args.URL)
+	if err != nil {
+		return fmt.Errorf("error sanitizing URL: %v", err)
+	}
+	
+	// Build the API URL for getting build info
+	apiURL := fmt.Sprintf("%s/api/build/%s/%s", sanitizedURL, url.PathEscape(args.BuildName), url.PathEscape(args.BuildNumber))
+	logrus.Infof("Fetching build info from: %s", apiURL)
+	
+	// Create the HTTP client
+	client := &http.Client{}
+	
+	// Create the GET request
+	req, err := http.NewRequest("GET", apiURL, nil)
+	if err != nil {
+		return fmt.Errorf("error creating request: %v", err)
+	}
+	
+	// Add authentication
+	if args.AccessToken != "" {
+		req.Header.Set("Authorization", "Bearer "+args.AccessToken)
+	} else if args.APIKey != "" {
+		req.Header.Set("X-JFrog-Art-Api", args.APIKey)
+	} else if args.Username != "" && args.Password != "" {
+		req.SetBasicAuth(args.Username, args.Password)
+	} else {
+		return fmt.Errorf("no authentication method provided")
+	}
+	
+	// Execute the request
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("error executing request: %v", err)
+	}
+	defer resp.Body.Close()
+	
+	// Check response status
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("unexpected response status: %d - %s", resp.StatusCode, string(body))
+	}
+	
+	// Read and parse the build info
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("error reading response body: %v", err)
+	}
+	
+	// Unmarshal into a generic map to allow for easy modification
+	var buildInfo map[string]interface{}
+	if err := json.Unmarshal(body, &buildInfo); err != nil {
+		return fmt.Errorf("error unmarshaling build info: %v", err)
+	}
+	
+	// Add principal to the buildInfo
+	buildInfoObj, ok := buildInfo["buildInfo"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("buildInfo not found or has unexpected format")
+	}
+	
+	// Add the principal field
+	buildInfoObj["principal"] = principal
+	logrus.Infof("Added principal '%s' to build info", principal)
+	
+	// Marshal back to JSON
+	updatedBody, err := json.Marshal(buildInfo)
+	if err != nil {
+		return fmt.Errorf("error marshaling updated build info: %v", err)
+	}
+	
+	// Create the PUT request to update the build info
+	apiURL = fmt.Sprintf("%s/api/build", sanitizedURL)
+	req, err = http.NewRequest("PUT", apiURL, strings.NewReader(string(updatedBody)))
+	if err != nil {
+		return fmt.Errorf("error creating update request: %v", err)
+	}
+	
+	// Add authentication again
+	if args.AccessToken != "" {
+		req.Header.Set("Authorization", "Bearer "+args.AccessToken)
+	} else if args.APIKey != "" {
+		req.Header.Set("X-JFrog-Art-Api", args.APIKey)
+	} else if args.Username != "" && args.Password != "" {
+		req.SetBasicAuth(args.Username, args.Password)
+	}
+	
+	// Add content type header
+	req.Header.Set("Content-Type", "application/json")
+	
+	// Execute the update request
+	resp, err = client.Do(req)
+	if err != nil {
+		return fmt.Errorf("error executing update request: %v", err)
+	}
+	defer resp.Body.Close()
+	
+	// Check response status
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("unexpected update response status: %d - %s", resp.StatusCode, string(body))
+	}
+	
+	logrus.Info("Successfully updated build info with principal")
+	return nil
+}
+
 func sanitizeURL(inputURL string) (string, error) {
 	parsedURL, err := url.Parse(inputURL)
 	if err != nil {
