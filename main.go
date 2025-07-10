@@ -339,8 +339,12 @@ func addPrincipalToBuildInfo(args Args, principal string) error {
 		return fmt.Errorf("error sanitizing URL: %v", err)
 	}
 	
+	// Remove trailing slash if present
+	sanitizedURL = strings.TrimSuffix(sanitizedURL, "/")
+	
 	// Build the API URL for getting build info
-	apiURL := fmt.Sprintf("%s/api/build/%s/%s", sanitizedURL, url.PathEscape(args.BuildName), url.PathEscape(args.BuildNumber))
+	// Use url.QueryEscape instead of url.PathEscape to properly handle spaces and special characters
+	apiURL := fmt.Sprintf("%s/api/build/%s/%s", sanitizedURL, url.QueryEscape(args.BuildName), url.QueryEscape(args.BuildNumber))
 	logrus.Infof("Fetching build info from: %s", apiURL)
 	
 	// Create the HTTP client
@@ -373,7 +377,8 @@ func addPrincipalToBuildInfo(args Args, principal string) error {
 	// Check response status
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("unexpected response status: %d - %s", resp.StatusCode, string(body))
+		logrus.Errorf("API call failed with status %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("API request failed with status: %d - check logs for details", resp.StatusCode)
 	}
 	
 	// Read and parse the build info
@@ -396,7 +401,10 @@ func addPrincipalToBuildInfo(args Args, principal string) error {
 	
 	// Add the principal field
 	buildInfoObj["principal"] = principal
-	logrus.Infof("Added principal '%s' to build info", principal)
+	logrus.Infof("Adding principal '%s' to build info JSON structure", principal)
+	
+	// Debug: Log the structure of buildInfoObj
+	logrus.Debugf("Build info structure: %+v", buildInfoObj)
 	
 	// Marshal back to JSON
 	updatedBody, err := json.Marshal(buildInfo)
@@ -433,7 +441,8 @@ func addPrincipalToBuildInfo(args Args, principal string) error {
 	// Check response status
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("unexpected update response status: %d - %s", resp.StatusCode, string(body))
+		logrus.Errorf("API PUT call failed with status %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("API PUT request failed with status: %d - check logs for details", resp.StatusCode)
 	}
 	
 	logrus.Info("Successfully updated build info with principal")
