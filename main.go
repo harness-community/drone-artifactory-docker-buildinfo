@@ -37,6 +37,7 @@ type Args struct {
 	TagName         string `envconfig:"DRONE_TAG"`
 	CommitMessage   string `envconfig:"DRONE_COMMIT_MESSAGE"`
 	DefaultPath     string `envconfig:"DRONE_WORKSPACE"`
+	BuildTrigger    string `envconfig:"DRONE_BUILD_TRIGGER"`
 }
 
 // Artifact represents a Docker image artifact with its SHA256 hash.
@@ -205,17 +206,23 @@ func Exec(ctx context.Context, args Args) error {
 	}
 	
 	// Add Principal directly via REST API using build trigger
-	buildTrigger := os.Getenv("DRONE_BUILD_TRIGGER")
-	if buildTrigger != "" {
+	if args.BuildTrigger != "" {
 		logrus.WithFields(logrus.Fields{
-			"principal": buildTrigger,
+			"principal": args.BuildTrigger,
 		}).Info("Adding Principal information via REST API")
 		
-		// Brief pause for build-publish to complete and be available via API
-		time.Sleep(5 * time.Second)
+		// Poll for build info to be available in the API
+		pollCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+		
+		// Wait for build info to be available
+		if err := pollForBuildInfo(pollCtx, args); err != nil {
+			logrus.Warnf("error waiting for build info: %v", err)
+			return nil
+		}
 		
 		// Get the build info via API, modify it, and re-upload it
-		if err := addPrincipalToBuildInfo(args, buildTrigger); err != nil {
+		if err := addPrincipalToBuildInfo(pollCtx, args, args.BuildTrigger); err != nil {
 			logrus.Warnf("error adding principal to build info: %v", err)
 		}
 	}
@@ -332,8 +339,92 @@ func parseDockerImage(dockerImage string) (repo, imageName, imageTag string, err
 }
 
 // sanitizeURL trims the URL to include only up to the '/artifactory/' path.
+// JFrogBuildInfo represents the structure of build info from JFrog API
+type JFrogBuildInfo struct {
+	BuildInfo struct {
+		Agent              interface{} `json:"agent"`
+		ArtifactoryPrincipal string     `json:"artifactoryPrincipal"`
+		BuildAgent         interface{} `json:"buildAgent"`
+		DurationMillis     int64       `json:"durationMillis"`
+		Modules            []interface{} `json:"modules"`
+		Name               string      `json:"name"`
+		Number             string      `json:"number"`
+		Principal          string      `json:"principal,omitempty"`
+		Started            string      `json:"started"`
+		URL                string      `json:"url"`
+		VCS                []interface{} `json:"vcs"`
+		Version            string      `json:"version"`
+	} `json:"buildInfo"`
+	URI string `json:"uri"`
+}
+
 // addPrincipalToBuildInfo adds the principal field to the build info via REST API
-func addPrincipalToBuildInfo(args Args, principal string) error {
+// pollForBuildInfo polls the JFrog API until the build info is available or timeout occurs
+func pollForBuildInfo(ctx context.Context, args Args) error {
+	logrus.Info("Polling for build info availability...")
+	
+	sanitizedURL, err := sanitizeURL(args.URL)
+	if err != nil {
+		return fmt.Errorf("error sanitizing URL: %v", err)
+	}
+	sanitizedURL = strings.TrimSuffix(sanitizedURL, "/")
+	
+	encodedBuildName := strings.ReplaceAll(url.QueryEscape(args.BuildName), "+", "%20")
+	encodedBuildNumber := strings.ReplaceAll(url.QueryEscape(args.BuildNumber), "+", "%20")
+	apiURL := fmt.Sprintf("%s/api/build/%s/%s", sanitizedURL, encodedBuildName, encodedBuildNumber)
+	
+	// Poll with exponential backoff
+	backoff := 1 * time.Second
+	maxBackoff := 5 * time.Second
+	
+	for {
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("timeout waiting for build info to be available")
+		default:
+			if err := checkBuildInfoExists(ctx, apiURL, args); err == nil {
+				logrus.Info("Build info is now available")
+				return nil
+			}
+			
+			logrus.Debugf("Build info not yet available, retrying in %v", backoff)
+			time.Sleep(backoff)
+			
+			// Increase backoff, but don't exceed max
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
+	}
+}
+
+// checkBuildInfoExists checks if the build info is available in JFrog
+func checkBuildInfoExists(ctx context.Context, apiURL string, args Args) error {
+	req, err := http.NewRequestWithContext(ctx, "HEAD", apiURL, nil)
+	if err != nil {
+		return err
+	}
+	
+	if err := setAuthHeaders(req, args); err != nil {
+		return err
+	}
+	
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("build info not available yet: status code %d", resp.StatusCode)
+	}
+	
+	return nil
+}
+
+func addPrincipalToBuildInfo(ctx context.Context, args Args, principal string) error {
 	sanitizedURL, err := sanitizeURL(args.URL)
 	if err != nil {
 		return fmt.Errorf("error sanitizing URL: %v", err)
@@ -353,21 +444,15 @@ func addPrincipalToBuildInfo(args Args, principal string) error {
 	// Create the HTTP client
 	client := &http.Client{}
 	
-	// Create the GET request
-	req, err := http.NewRequest("GET", apiURL, nil)
+	// Create the GET request with context
+	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
 	if err != nil {
 		return fmt.Errorf("error creating request: %v", err)
 	}
 	
-	// Add authentication
-	if args.AccessToken != "" {
-		req.Header.Set("Authorization", "Bearer "+args.AccessToken)
-	} else if args.APIKey != "" {
-		req.Header.Set("X-JFrog-Art-Api", args.APIKey)
-	} else if args.Username != "" && args.Password != "" {
-		req.SetBasicAuth(args.Username, args.Password)
-	} else {
-		return fmt.Errorf("no authentication method provided")
+	// Add authentication headers
+	if err := setAuthHeaders(req, args); err != nil {
+		return err
 	}
 	
 	// Execute the request
@@ -390,25 +475,19 @@ func addPrincipalToBuildInfo(args Args, principal string) error {
 		return fmt.Errorf("error reading response body: %v", err)
 	}
 	
-	// Unmarshal into a generic map to allow for easy modification
-	var buildInfo map[string]interface{}
+	// Unmarshal into a struct for type safety
+	var buildInfo JFrogBuildInfo
 	if err := json.Unmarshal(body, &buildInfo); err != nil {
 		return fmt.Errorf("error unmarshaling build info: %v", err)
 	}
 	
 
-	// Extract the inner buildInfo object from the response
-	buildInfoObj, ok := buildInfo["buildInfo"].(map[string]interface{})
-	if !ok {
-		return fmt.Errorf("buildInfo not found or has unexpected format")
-	}
-	
-	// Add the principal field without disturbing required fields
-	buildInfoObj["principal"] = principal
+	// Add the principal field to the buildInfo struct
+	buildInfo.BuildInfo.Principal = principal
 	logrus.Infof("Adding principal '%s' to build info JSON structure", principal)
 	
-	// Extract just the buildInfo object for the PUT request - JFrog API expects this format
-	updatedBody, err := json.Marshal(buildInfoObj)
+	// Extract just the inner buildInfo object for the PUT request - JFrog API expects this format
+	updatedBody, err := json.Marshal(buildInfo.BuildInfo)
 	if err != nil {
 		return fmt.Errorf("error marshaling updated build info: %v", err)
 	}
@@ -418,18 +497,14 @@ func addPrincipalToBuildInfo(args Args, principal string) error {
 	
 	// Create the PUT request to update the build info
 	apiURL = fmt.Sprintf("%s/api/build", sanitizedURL)
-	req, err = http.NewRequest("PUT", apiURL, strings.NewReader(string(updatedBody)))
+	req, err = http.NewRequestWithContext(ctx, "PUT", apiURL, strings.NewReader(string(updatedBody)))
 	if err != nil {
 		return fmt.Errorf("error creating update request: %v", err)
 	}
 	
-	// Add authentication again
-	if args.AccessToken != "" {
-		req.Header.Set("Authorization", "Bearer "+args.AccessToken)
-	} else if args.APIKey != "" {
-		req.Header.Set("X-JFrog-Art-Api", args.APIKey)
-	} else if args.Username != "" && args.Password != "" {
-		req.SetBasicAuth(args.Username, args.Password)
+	// Add authentication headers
+	if err := setAuthHeaders(req, args); err != nil {
+		return err
 	}
 	
 	// Add content type header
@@ -450,6 +525,20 @@ func addPrincipalToBuildInfo(args Args, principal string) error {
 	}
 	
 	logrus.Info("Successfully updated build info with principal")
+	return nil
+}
+
+// setAuthHeaders adds the appropriate authentication headers to an HTTP request
+func setAuthHeaders(req *http.Request, args Args) error {
+	if args.AccessToken != "" {
+		req.Header.Set("Authorization", "Bearer "+args.AccessToken)
+	} else if args.APIKey != "" {
+		req.Header.Set("X-JFrog-Art-Api", args.APIKey)
+	} else if args.Username != "" && args.Password != "" {
+		req.SetBasicAuth(args.Username, args.Password)
+	} else {
+		return fmt.Errorf("no authentication method provided")
+	}
 	return nil
 }
 
