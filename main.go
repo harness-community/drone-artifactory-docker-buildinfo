@@ -204,23 +204,23 @@ func Exec(ctx context.Context, args Args) error {
 	if err := runCommand(cmdArgs); err != nil {
 		logrus.Fatalln("error executing jfrog rt build-publish command:", err)
 	}
-	
+
 	// Add Principal directly via REST API using build trigger
 	if args.BuildTrigger != "" {
 		logrus.WithFields(logrus.Fields{
 			"principal": args.BuildTrigger,
 		}).Info("Adding Principal information via REST API")
-		
+
 		// Poll for build info to be available in the API
 		pollCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
-		
+
 		// Wait for build info to be available
 		if err := pollForBuildInfo(pollCtx, args); err != nil {
 			logrus.Warnf("error waiting for build info: %v", err)
 			return nil
 		}
-		
+
 		// Get the build info via API, modify it, and re-upload it
 		if err := addPrincipalToBuildInfo(pollCtx, args, args.BuildTrigger); err != nil {
 			logrus.Warnf("error adding principal to build info: %v", err)
@@ -340,45 +340,29 @@ func parseDockerImage(dockerImage string) (repo, imageName, imageTag string, err
 	return repo, imageName, imageTag, nil
 }
 
-// sanitizeURL trims the URL to include only up to the '/artifactory/' path.
-// JFrogBuildInfo represents the structure of build info from JFrog API
-type JFrogBuildInfo struct {
-	BuildInfo struct {
-		Agent              interface{} `json:"agent"`
-		ArtifactoryPrincipal string     `json:"artifactoryPrincipal"`
-		BuildAgent         interface{} `json:"buildAgent"`
-		DurationMillis     int64       `json:"durationMillis"`
-		Modules            []interface{} `json:"modules"`
-		Name               string      `json:"name"`
-		Number             string      `json:"number"`
-		Principal          string      `json:"principal,omitempty"`
-		Started            string      `json:"started"`
-		URL                string      `json:"url"`
-		VCS                []interface{} `json:"vcs"`
-		Version            string      `json:"version"`
-	} `json:"buildInfo"`
-	URI string `json:"uri"`
+type BuildPrincipal struct {
+	Principal string `json:"principal"`
 }
 
 // addPrincipalToBuildInfo adds the principal field to the build info via REST API
 // pollForBuildInfo polls the JFrog API until the build info is available or timeout occurs
 func pollForBuildInfo(ctx context.Context, args Args) error {
 	logrus.Info("Polling for build info availability...")
-	
+
 	sanitizedURL, err := sanitizeURL(args.URL)
 	if err != nil {
 		return fmt.Errorf("error sanitizing URL: %v", err)
 	}
 	sanitizedURL = strings.TrimSuffix(sanitizedURL, "/")
-	
+
 	encodedBuildName := strings.ReplaceAll(url.QueryEscape(args.BuildName), "+", "%20")
 	encodedBuildNumber := strings.ReplaceAll(url.QueryEscape(args.BuildNumber), "+", "%20")
 	apiURL := fmt.Sprintf("%s/api/build/%s/%s", sanitizedURL, encodedBuildName, encodedBuildNumber)
-	
+
 	// Poll with exponential backoff
 	backoff := 1 * time.Second
 	maxBackoff := 5 * time.Second
-	
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -388,10 +372,10 @@ func pollForBuildInfo(ctx context.Context, args Args) error {
 				logrus.Info("Build info is now available")
 				return nil
 			}
-			
+
 			logrus.Debugf("Build info not yet available, retrying in %v", backoff)
 			time.Sleep(backoff)
-			
+
 			// Increase backoff, but don't exceed max
 			backoff *= 2
 			if backoff > maxBackoff {
@@ -401,28 +385,54 @@ func pollForBuildInfo(ctx context.Context, args Args) error {
 	}
 }
 
-// checkBuildInfoExists checks if the build info is available in JFrog
+// checkBuildInfoExists checks if the build info is available in JFrog and validates its content
 func checkBuildInfoExists(ctx context.Context, apiURL string, args Args) error {
-	req, err := http.NewRequestWithContext(ctx, "HEAD", apiURL, nil)
+	// Using GET instead of HEAD to get the actual content
+	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
 	if err != nil {
 		return err
 	}
-	
+
 	if err := setAuthHeaders(req, args); err != nil {
 		return err
 	}
-	
+
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("build info not available yet: status code %d", resp.StatusCode)
 	}
-	
+
+	// Read and validate the build info content
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("error reading response body: %v", err)
+	}
+
+	// Parse the JSON response
+	var buildInfoResponse map[string]interface{}
+	if err := json.Unmarshal(body, &buildInfoResponse); err != nil {
+		return fmt.Errorf("error parsing build info: %v", err)
+	}
+
+	// Get the buildInfo object
+	buildInfoObj, ok := buildInfoResponse["buildInfo"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("buildInfo field not found or has unexpected format")
+	}
+
+	// We only need to verify the build number to ensure we're looking at the right build
+	number, ok := buildInfoObj["number"].(string)
+	if !ok || number != args.BuildNumber {
+		return fmt.Errorf("build number mismatch or missing: expected %s, got %v", args.BuildNumber, number)
+	}
+
+	logrus.Debug("Build info validation successful")
 	return nil
 }
 
@@ -431,10 +441,10 @@ func addPrincipalToBuildInfo(ctx context.Context, args Args, principal string) e
 	if err != nil {
 		return fmt.Errorf("error sanitizing URL: %v", err)
 	}
-	
+
 	// Remove trailing slash if present
 	sanitizedURL = strings.TrimSuffix(sanitizedURL, "/")
-	
+
 	// Build the API URL for getting build info
 	// Manually encode the build name and number to ensure compatibility with JFrog API
 	// Replace spaces with %20 instead of + to match JFrog's expectations
@@ -442,90 +452,100 @@ func addPrincipalToBuildInfo(ctx context.Context, args Args, principal string) e
 	encodedBuildNumber := strings.ReplaceAll(url.QueryEscape(args.BuildNumber), "+", "%20")
 	apiURL := fmt.Sprintf("%s/api/build/%s/%s", sanitizedURL, encodedBuildName, encodedBuildNumber)
 	logrus.Infof("Fetching build info from: %s", apiURL)
-	
+
 	// Create the HTTP client
 	client := &http.Client{}
-	
+
 	// Create the GET request with context
 	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
 	if err != nil {
 		return fmt.Errorf("error creating request: %v", err)
 	}
-	
+
 	// Add authentication headers
 	if err := setAuthHeaders(req, args); err != nil {
 		return err
 	}
-	
+
 	// Execute the request
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("error executing request: %v", err)
 	}
 	defer resp.Body.Close()
-	
+
 	// Check response status
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		logrus.Errorf("API call failed with status %d: %s", resp.StatusCode, string(body))
 		return fmt.Errorf("API request failed with status: %d - check logs for details", resp.StatusCode)
 	}
-	
-	// Read and parse the build info
+
+	// Read the build info
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("error reading response body: %v", err)
 	}
-	
-	// Unmarshal into a struct for type safety
-	var buildInfo JFrogBuildInfo
-	if err := json.Unmarshal(body, &buildInfo); err != nil {
+
+	// Parse the JSON into a map
+	var buildInfoData map[string]interface{}
+	if err := json.Unmarshal(body, &buildInfoData); err != nil {
 		return fmt.Errorf("error unmarshaling build info: %v", err)
 	}
-	
 
-	// Add the principal field to the buildInfo struct
-	buildInfo.BuildInfo.Principal = principal
-	logrus.Infof("Adding principal '%s' to build info JSON structure", principal)
-	
-	// Extract just the inner buildInfo object for the PUT request - JFrog API expects this format
-	updatedBody, err := json.Marshal(buildInfo.BuildInfo)
+	// Get the buildInfo object
+	buildInfoObj, ok := buildInfoData["buildInfo"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("buildInfo not found or has unexpected format")
+	}
+
+	// Create a BuildPrincipal struct
+	principalData := BuildPrincipal{
+		Principal: principal,
+	}
+
+	// Add the principal field using the struct
+	buildInfoObj["principal"] = principalData.Principal
+	logrus.Infof("Adding principal '%s' to build info JSON structure", principalData.Principal)
+
+	// Marshal the buildInfo object for the PUT request - JFrog API expects this format
+	updatedBody, err := json.Marshal(buildInfoObj)
 	if err != nil {
 		return fmt.Errorf("error marshaling updated build info: %v", err)
 	}
-	
+
 	// Log at debug level for troubleshooting if needed
 	logrus.Debugf("Sending build info update to API")
-	
+
 	// Create the PUT request to update the build info
 	apiURL = fmt.Sprintf("%s/api/build", sanitizedURL)
 	req, err = http.NewRequestWithContext(ctx, "PUT", apiURL, strings.NewReader(string(updatedBody)))
 	if err != nil {
 		return fmt.Errorf("error creating update request: %v", err)
 	}
-	
+
 	// Add authentication headers
 	if err := setAuthHeaders(req, args); err != nil {
 		return err
 	}
-	
+
 	// Add content type header
 	req.Header.Set("Content-Type", "application/json")
-	
+
 	// Execute the update request
 	resp, err = client.Do(req)
 	if err != nil {
 		return fmt.Errorf("error executing update request: %v", err)
 	}
 	defer resp.Body.Close()
-	
+
 	// Check response status
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(resp.Body)
 		logrus.Errorf("API PUT call failed with status %d: %s", resp.StatusCode, string(body))
 		return fmt.Errorf("API PUT request failed with status: %d - check logs for details", resp.StatusCode)
 	}
-	
+
 	logrus.Info("Successfully updated build info with principal")
 	return nil
 }
@@ -534,8 +554,9 @@ func addPrincipalToBuildInfo(ctx context.Context, args Args, principal string) e
 func setAuthHeaders(req *http.Request, args Args) error {
 	if args.AccessToken != "" {
 		req.Header.Set("Authorization", "Bearer "+args.AccessToken)
-	} else if args.APIKey != "" {
-		req.Header.Set("X-JFrog-Art-Api", args.APIKey)
+	} else if args.APIKey != "" && args.Username != "" {
+		// Use API key as password with provided username
+		req.SetBasicAuth(args.Username, args.APIKey)
 	} else if args.Username != "" && args.Password != "" {
 		req.SetBasicAuth(args.Username, args.Password)
 	} else {
