@@ -295,8 +295,10 @@ func setAuthParams(cmdArgs []string, args Args) ([]string, error) {
 	if args.Username != "" && args.Password != "" {
 		cmdArgs = append(cmdArgs, fmt.Sprintf("--user=%s", args.Username))
 		cmdArgs = append(cmdArgs, fmt.Sprintf("--password=%s", args.Password))
-	} else if args.APIKey != "" {
-		cmdArgs = append(cmdArgs, fmt.Sprintf("--apikey=%s", args.APIKey))
+	} else if args.APIKey != "" && args.Username != "" {
+		// For JFrog CLI: API key is used as password with provided username
+		cmdArgs = append(cmdArgs, fmt.Sprintf("--user=%s", args.Username))
+		cmdArgs = append(cmdArgs, fmt.Sprintf("--password=%s", args.APIKey))
 	} else if args.AccessToken != "" {
 		cmdArgs = append(cmdArgs, fmt.Sprintf("--access-token=%s", args.AccessToken))
 	} else {
